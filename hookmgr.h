@@ -4,7 +4,12 @@
 
 // MadMax.exe 1.0.3.0
 
-#define ACT_EXE(gog, steam) ( (*(uint64_t*)(0x14192A150) == 0x1c3c00001bf0) ? (gog) : (steam) )
+// Store detection. This used to dereference 0x14192A150 directly, which is
+// evaluated even in static initialisers (see core/avasingle.cpp) -- on a game
+// build whose image does not cover that address the DLL crashed the game at
+// load time, before any of the plugin's own checks could run. It now goes
+// through a guarded, cached probe.
+#define ACT_EXE(gog, steam) ( HookMgr::IsKnownGogBuild() ? (gog) : (steam) )
 
 //#define STEAM_BASE_OFFS (0x0) // 0x1447400 ???
 //#define STEAM_BASE (0x140000000)
@@ -30,6 +35,11 @@ public:
 	
 	static bool isSteam;
 	static bool isGOG;
+
+	// true only when the magic value of the known GOG build is readable there
+	static bool IsKnownGogBuild();
+	// true when the SDK's hard-coded addresses can be trusted on this build
+	static bool SdkAddressesUsable();
 
 	static void Initialize();
 

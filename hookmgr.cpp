@@ -9,6 +9,37 @@
 bool HookMgr::isSteam = false;
 bool HookMgr::isGOG = false;
 
+static bool ReadableQword(uintptr_t addr, uint64_t& out) {
+	MEMORY_BASIC_INFORMATION mbi = {};
+	if (!VirtualQuery((LPCVOID)addr, &mbi, sizeof(mbi))) return false;
+	if (mbi.State != MEM_COMMIT) return false;
+	const DWORD readable = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY |
+		PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+	if ((mbi.Protect & readable) == 0 || (mbi.Protect & PAGE_GUARD)) return false;
+	if (addr + sizeof(uint64_t) > (uintptr_t)mbi.BaseAddress + mbi.RegionSize) return false;
+	out = *(const uint64_t*)addr;
+	return true;
+}
+
+bool HookMgr::IsKnownGogBuild() {
+	static int cached = -1;
+	if (cached < 0) {
+		uint64_t v = 0;
+		cached = (ReadableQword(0x14192A150ull, v) && v == 0x1c3c00001bf0ull) ? 1 : 0;
+	}
+	return cached == 1;
+}
+
+bool HookMgr::SdkAddressesUsable() {
+	// The SDK's ADDRESS(gog, steam) pairs only describe two specific builds.
+	// The GOG one is verified by its magic value; the Steam one is assumed
+	// when the magic address is readable but holds something else. Anything
+	// else (address not mapped at all) means the SDK addresses are unusable
+	// and callers must not follow them.
+	uint64_t v = 0;
+	return ReadableQword(0x14192A150ull, v);
+}
+
 std::ofstream out;
 std::ofstream outSpawn;
 
