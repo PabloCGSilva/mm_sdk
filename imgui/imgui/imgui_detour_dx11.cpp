@@ -16,9 +16,19 @@ WNDPROC ImGui::DetourDX11::oWndProc = nullptr;
 
 extern LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
+// The window procedure runs on the window's thread, the render setups are created and destroyed on another
+// one: a WM_MOUSEMOVE that came in while the Win32 backend was being shut down wrote through its freed data
+// (crash on closing the game, 2026-10-25 on GOG, steamtest6 on Steam). Backend init/shutdown and the frame
+// hold this lock exclusively / shared; the window procedure only feeds ImGui when it gets it at once.
+static SRWLOCK s_imguiLock = SRWLOCK_INIT;
+
 LRESULT __stdcall ImGui::DetourDX11::WndProc(const HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
-	if (true && ImGui_ImplWin32_WndProcHandler(hWnd, uMsg, wParam, lParam))
-		return true;
+	if (TryAcquireSRWLockShared(&s_imguiLock)) {
+		LRESULT handled = ImGui_ImplWin32_WndProcHandler(hWnd, uMsg, wParam, lParam);
+		ReleaseSRWLockShared(&s_imguiLock);
+		if (handled)
+			return true;
+	}
 
 	return CallWindowProc(oWndProc, hWnd, uMsg, wParam, lParam);
 }
@@ -28,7 +38,8 @@ DEFHOOK(void, Graphics__Flip, (Graphics::HDevice_t* device)) {
 	if (device->m_Context->m_Mutex)
 		EnterCriticalSection((LPCRITICAL_SECTION)device->m_Context->m_Mutex);
 
-	if (ImGui::GetCurrentContext()) {
+	bool locked = TryAcquireSRWLockShared(&s_imguiLock) != 0;
+	if (locked && ImGui::GetCurrentContext()) {
 		ImGui_ImplDX11_NewFrame();
 		ImGui_ImplWin32_NewFrame();
 
@@ -42,6 +53,8 @@ DEFHOOK(void, Graphics__Flip, (Graphics::HDevice_t* device)) {
 
 		ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
 	}
+	if (locked)
+		ReleaseSRWLockShared(&s_imguiLock);
 
 	if (device->m_Context->m_Mutex)
 		LeaveCriticalSection((LPCRITICAL_SECTION)device->m_Context->m_Mutex);
@@ -51,12 +64,14 @@ DEFHOOK(void, Graphics__Flip, (Graphics::HDevice_t* device)) {
 
 DEFHOOK(void, DestroyRenderSetups, (NGraphicsEngine::CGraphicsEngine* thiz)) {
 
+	AcquireSRWLockExclusive(&s_imguiLock);
 	if (ImGui::DetourDX11::_onShutdown)
 		ImGui::DetourDX11::_onShutdown();
 
 	ImGui_ImplDX11_Shutdown();
 	ImGui_ImplWin32_Shutdown();
 	ImGui::DestroyContext();
+	ReleaseSRWLockExclusive(&s_imguiLock);
 
 	return DestroyRenderSetups_orig(thiz);
 }
@@ -69,6 +84,7 @@ DEFHOOK(void, CreateRenderSetups, (NGraphicsEngine::CGraphicsEngine* thiz)) {
 	DXGI_SWAP_CHAIN_DESC sd;
 	thiz->m_GraphicsDevice->m_SwapChain->GetDesc(&sd);
 
+	AcquireSRWLockExclusive(&s_imguiLock);
 	bool needCallInit = false;
 	if (!ImGui::GetCurrentContext()) {
 		ImGui::CreateContext();
@@ -86,6 +102,7 @@ DEFHOOK(void, CreateRenderSetups, (NGraphicsEngine::CGraphicsEngine* thiz)) {
 		ImGui::DetourDX11::_onInit(reInit);
 		reInit = true;
 	}
+	ReleaseSRWLockExclusive(&s_imguiLock);
 }
 
 void ImGui::DetourDX11::Install(uintptr_t flipAddr, uintptr_t createRender, uintptr_t destroyRender,
